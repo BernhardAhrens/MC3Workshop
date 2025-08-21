@@ -30,17 +30,17 @@
 # First, ensure you have the required packages installed:
 
 ENV["JULIA_PKG_PRECOMPILE_AUTO"]=0
-using Pkg
+#using Pkg
 #default_jupyter_noteboks_pkgs = ["Adapt", "CSV", "DataFrames", "IJulia", "Lux",
 #  "Makie", "Plots", "Reactant", "CUDA_Runtime_jll", "CUDA"]
 #Pkg.rm(default_jupyter_noteboks_pkgs)
-required_pkgs = ["ClimaLand", "ClimaDiagnostics", "CairoMakie",
-  "EnsembleKalmanProcesses", "Random", "Logging", "ClimaAnalysis", "GeoMakie",
-  "Printf", "StatsBase"]
-Pkg.add(required_pkgs)
-Pkg.instantiate()
-Pkg.add(PackageSpec("ClimaLand", v"0.18.1"))
-Pkg.precompile()
+#required_pkgs = ["ClimaLand", "ClimaDiagnostics", "CairoMakie",
+#  "EnsembleKalmanProcesses", "Random", "Logging", "ClimaAnalysis", "GeoMakie",
+#  "Printf", "StatsBase"]
+#Pkg.add(required_pkgs)
+#Pkg.instantiate()
+#Pkg.add(PackageSpec("ClimaLand", v"0.18.1"))
+#Pkg.precompile()
 
 ## =============================================================================
 # Setup and Imports
@@ -237,28 +237,45 @@ end
 
 function G(; Ea_sx =61e3, kM_sx = 5e-3, kM_o2 = 4e-3)
     simulation = model(; Ea_sx, kM_sx, kM_o2)
-    lhf = get_lhf(simulation)
-    observation =
+    sco2 = get_sco2(simulation)
+    hr = get_hr(simulation)
+    sco2_obs =
         Float64.(
             get_diurnal_average(
-                lhf,
+                sco2,
                 simulation.start_date,
                 simulation.start_date + Day(20),
             )
         )
-    return observation
+    hr_obs =
+        Float64.(
+            get_diurnal_average(
+                hr,
+                simulation.start_date,
+                simulation.start_date + Day(20),
+            )
+        )
+    return (; sco2_obs, hr_obs)
 end
 
 # =============================================================================
 # Helper function: Extract latent heat flux from simulation diagnostics
 # =============================================================================
 
-function get_lhf(simulation)
+function get_sco2(simulation)
     return ClimaLand.Diagnostics.diagnostic_as_vectors(
         simulation.diagnostics[1].output_writer,
-        "lhf_1h_average",
+        "sco2_1h_average",
     )
 end
+
+function get_hr(simulation)
+    return ClimaLand.Diagnostics.diagnostic_as_vectors(
+        simulation.diagnostics[1].output_writer,
+        "hr_1h_average",
+    )
+end
+
 
 # =============================================================================
 # Helper function: Compute diurnal average of a variable
@@ -291,7 +308,9 @@ end
 true_Ea_sx = 61e3
 true_kM_sx = 5e-3
 true_kM_o2 = 4e-3
-observations = G(; Ea_sx = true_Ea_sx, kM_sx = true_kM_sx, kM_o2 = true_kM_o2)
+sco2_obs, hr_obs = G(; Ea_sx = true_Ea_sx, kM_sx = true_kM_sx, kM_o2 = true_kM_o2)
+
+observations = hr_obs
 
 # =============================================================================
 # Define observation error covariance for the ensemble Kalman process. A flat
