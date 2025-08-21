@@ -105,7 +105,8 @@ site_ID_val = FluxnetSimulations.replace_hyphen(site_ID)
 # =============================================================================
 
 (start_date, stop_date) = FluxnetSimulations.get_data_dates(site_ID, time_offset)
-stop_date = DateTime(2010, 4, 1, 6, 30)  # Set the stop date manually
+start_date = DateTime(2010, 3, 1, 6, 30)  # Set the start date manually
+stop_date = DateTime(2010, 6, 1, 6, 30)  # Set the stop date manually
 Δt = 450.0  # seconds
 
 # =============================================================================
@@ -311,6 +312,41 @@ true_kM_o2 = 4e-3*1.2
 sco2_obs, hr_obs = G(true_Ea_sx, true_kM_sx, true_kM_o2)
 
 observations = hr_obs
+
+
+# =============================================================================
+# Plot observations over time
+# =============================================================================
+
+# Create a time series for the observations (24 hourly values)
+observation_times = collect(start_date:Hour(1):start_date + Day(1) - Hour(1))
+
+# Create the plot
+fig_obs = Figure(size = (800, 400))
+ax_obs = Axis(
+    fig_obs[1, 1];
+    title = "Observations over Time",
+    xlabel = "Time",
+    ylabel = "Heterotrophic Respiration"
+)
+
+# Plot observations
+lines!(ax_obs, observation_times, observations; color = :blue, linewidth = 2, label = "Observations")
+#scatter!(ax_obs, observation_times, observations; color = :red, markersize = 8, label = "Data points")
+
+# Format x-axis to show dates nicely
+ax_obs.xtickformat = Dates.DateFormat("HH:MM")
+
+# Add legend
+axislegend(ax_obs, position = :rt)
+
+# Adjust layout and save
+resize_to_layout!(fig_obs)
+save("observations_over_time.png", fig_obs)
+fig_obs
+
+
+
 
 # =============================================================================
 # Define observation error covariance for the ensemble Kalman process. A flat
