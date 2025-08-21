@@ -305,9 +305,9 @@ end
 # from our target parameter value. This parameter will be recovered by the
 # calibration.
 
-true_Ea_sx = 61e3
-true_kM_sx = 5e-3
-true_kM_o2 = 4e-3
+true_Ea_sx = 61e3*0.8
+true_kM_sx = 5e-3*1.2	
+true_kM_o2 = 4e-3*1.2
 sco2_obs, hr_obs = G(true_Ea_sx, true_kM_sx, true_kM_o2)
 
 observations = hr_obs
@@ -340,7 +340,7 @@ prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
 # =============================================================================
 
 ensemble_size = 10
-N_iterations = 3
+N_iterations = 2
 
 # =============================================================================
 # Ensemble Kalman Inversion
