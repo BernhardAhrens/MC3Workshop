@@ -255,7 +255,7 @@ function G(Ea_sx, kM_sx, kM_o2)
                 simulation.start_date + Day(20),
             )
         )
-    return (; sco2_obs, hr_obs)
+    return (sco2_obs, hr_obs)
 end
 
 # =============================================================================
