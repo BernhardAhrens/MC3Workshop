@@ -42,7 +42,7 @@ Pkg.instantiate()
 Pkg.add(PackageSpec("ClimaLand", v"0.18.1"))
 Pkg.precompile()
 
-# =============================================================================
+## =============================================================================
 # Setup and Imports
 # =============================================================================
 # 
@@ -51,7 +51,8 @@ Pkg.precompile()
 
 using ClimaLand
 using ClimaLand.Domains: Column
-using ClimaLand.Canopy
+using ClimaLand.Soil
+
 using ClimaLand.Simulations
 import ClimaLand.FluxnetSimulations as FluxnetSimulations
 import ClimaLand.Parameters as LP
@@ -160,15 +161,15 @@ LAI = ClimaLand.prescribed_lai_modis(
 # components. This comprehensive model allows us to simulate the full land
 # surface system and its interactions.
 
-function model(; Ea_sx, Km_sx)
+function model(; Ea_sx, kM_sx, kM_o2)
 
     Ea_sx = FT(Ea_sx)
-    Km_sx = FT(Km_sx)
-
+    kM_sx = FT(kM_sx)
+    kM_o2 = FT(kM_o2)
     # Set up ground conditions and define which components to simulate prognostically
     prognostic_land_components = (:canopy, :snow, :soil, :soilco2)
 
-    soil_co2_parameters = Soil.Biogeochemistry.SoilCO2ModelParameters(FT ; Km_sx, Ea_sx)
+    soil_co2_parameters = Soil.Biogeochemistry.SoilCO2ModelParameters(FT ; kM_sx, Ea_sx, kM_o2)
 
     soil = Soil.EnergyHydrology{FT}(
         domain,
@@ -234,8 +235,8 @@ end
 # This function runs the model and computes diurnal average of latent heat flux
 # =============================================================================
 
-function G(Vcmax25)
-    simulation = model(Vcmax25)
+function G(; Ea_sx =61e3, kM_sx = 5e-3, kM_o2 = 4e-3)
+    simulation = model(; Ea_sx, kM_sx, kM_o2)
     lhf = get_lhf(simulation)
     observation =
         Float64.(
@@ -287,8 +288,10 @@ end
 # from our target parameter value. This parameter will be recovered by the
 # calibration.
 
-true_Vcmax25 = 0.0001 # [mol m-2 s-1]
-observations = G(true_Vcmax25)
+true_Ea_sx = 61e3
+true_kM_sx = 5e-3
+true_kM_o2 = 4e-3
+observations = G(; Ea_sx = true_Ea_sx, kM_sx = true_kM_sx, kM_o2 = true_kM_o2)
 
 # =============================================================================
 # Define observation error covariance for the ensemble Kalman process. A flat
@@ -308,7 +311,10 @@ noise_covariance = 0.05 * EKP.I
 # Constrained Gaussian prior for Vcmax25 with bounds [0, 2e-3]
 # =============================================================================
 
-prior = PD.constrained_gaussian("Vcmax25", 1e-3, 5e-4, 0, 2e-3)
+prior_u1 = PD.constrained_gaussian("Ea_sx", 61e3, 10e3, 0, 200e3)
+prior_u2 = PD.constrained_gaussian("kM_sx", 5e-3, 1e-3, 0, 20e-3)
+prior_u3 = PD.constrained_gaussian("kM_o2", 4e-3, 1e-3, 0, 20e-3)
+prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
 
 # =============================================================================
 # Set the ensemble size and number of iterations
