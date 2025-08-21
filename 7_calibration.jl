@@ -235,7 +235,7 @@ end
 # This function runs the model and computes diurnal average of latent heat flux
 # =============================================================================
 
-function G(; Ea_sx =61e3, kM_sx = 5e-3, kM_o2 = 4e-3)
+function G(Ea_sx, kM_sx, kM_o2)
     simulation = model(; Ea_sx, kM_sx, kM_o2)
     sco2 = get_sco2(simulation)
     hr = get_hr(simulation)
@@ -308,7 +308,7 @@ end
 true_Ea_sx = 61e3
 true_kM_sx = 5e-3
 true_kM_o2 = 4e-3
-sco2_obs, hr_obs = G(; Ea_sx = true_Ea_sx, kM_sx = true_kM_sx, kM_o2 = true_kM_o2)
+sco2_obs, hr_obs = G(true_Ea_sx, true_kM_sx, true_kM_o2)
 
 observations = hr_obs
 
