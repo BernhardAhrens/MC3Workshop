@@ -162,7 +162,7 @@ LAI = ClimaLand.prescribed_lai_modis(
 # components. This comprehensive model allows us to simulate the full land
 # surface system and its interactions.
 
-function model(; Ea_sx, kM_sx, kM_o2)
+function model(; Ea_sx, kM_sx, kM_o2, forcing = forcing, LAI = LAI)
 
     Ea_sx = FT(Ea_sx)
     kM_sx = FT(kM_sx)
@@ -373,8 +373,6 @@ prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
 # Set the ensemble size and number of iterations
 # =============================================================================
 
-ensemble_size = 10
-N_iterations = 2
 
 # =============================================================================
 # Ensemble Kalman Inversion
@@ -382,6 +380,8 @@ N_iterations = 2
 # 
 # Initialize and run the ensemble Kalman process:
 
+ensemble_size = 3
+N_iterations = 2
 # =============================================================================
 # Sample the initial parameter ensemble from the prior distribution
 # =============================================================================
@@ -443,13 +443,13 @@ addprocs(11; exeflags="--project")  # pick your count
     canopy_forcing = Canopy.CanopyForcing(forcing, LAI, earth_param_set, domain, Δt)
 end
  =#
-function run_ensembles(params, nobs, nens)
+#= function run_ensembles(params, nobs, nens)
     parts = pmap(1:nens) do j
         _, _, _, hr = G(params[1,j], params[2,j], params[3,j])
         Float64.(hr)
     end
     reduce(hcat, parts)
-end
+end =#
 
 # =============================================================================
 # Run the ensemble of forward models to iteratively update the parameter ensemble.
@@ -458,16 +458,26 @@ end
 # This snippet will take a while to execute, since it is executing 30 forward 
 # model runs in sequence.
 # =============================================================================
-Threads.nthreads()
+# Threads.nthreads()
+
+using Distributed
+addprocs(4; exeflags = "--project")
+
+function run_ensembles2(params, nd, N_ens)
+    g_ens = zeros(nd, N_ens)
+    g_ens[:, :] = vcat(pmap(x -> G(x[1], x[2], x[3]), params)...)
+    return g_ens
+end
 
 length_observations = length(observations)
+
 
 Logging.with_logger(SimpleLogger(devnull, Logging.Error)) do
     for i in 1:N_iterations
         println("Iteration $i")
         params_i = EKP.get_ϕ_final(prior, ensemble_kalman_process)
-        #G_ens = run_ensembles(params_i, length_observations, ensemble_size)  
-        G_ens = hcat([Float64.(G(params_i[:, j]...)[4]) for j in 1:ensemble_size]...) #Float64
+        G_ens = run_ensembles(params_i, length_observations, ensemble_size)  
+        #G_ens = hcat([Float64.(G(params_i[:, j]...)[4]) for j in 1:ensemble_size]...) #Float64
         EKP.update_ensemble!(ensemble_kalman_process, G_ens)
     end
 end
