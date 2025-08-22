@@ -311,7 +311,7 @@ true_kM_sx = 5e-3*1.2
 true_kM_o2 = 4e-3*1.2
 sco2_diurnal, hr_diurnal, sco2, hr = G(true_Ea_sx, true_kM_sx, true_kM_o2)
 
-observations = Float64.(hr_diurnal)
+observations = Float64.(hr)
 
 out = G(true_Ea_sx, true_kM_sx, true_kM_o2)
 
@@ -373,8 +373,8 @@ prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
 # Set the ensemble size and number of iterations
 # =============================================================================
 
-ensemble_size = 30
-N_iterations = 20
+ensemble_size = 10
+N_iterations = 2
 
 # =============================================================================
 # Ensemble Kalman Inversion
@@ -413,7 +413,7 @@ function run_ensembles(params, length_observations, ensemble_size)
     end
     return G_ens
 end
-
+#= 
 using Distributed
 addprocs(11; exeflags="--project")  # pick your count
 
@@ -442,11 +442,11 @@ addprocs(11; exeflags="--project")  # pick your count
     canopy_parameters = Canopy.CanopyModelParameters(FT)
     canopy_forcing = Canopy.CanopyForcing(forcing, LAI, earth_param_set, domain, Δt)
 end
-
+ =#
 function run_ensembles(params, nobs, nens)
     parts = pmap(1:nens) do j
-        _, hr_diurnal, _, _ = G(params[1,j], params[2,j], params[3,j])
-        Float64.(hr_diurnal)
+        _, _, _, hr = G(params[1,j], params[2,j], params[3,j])
+        Float64.(hr)
     end
     reduce(hcat, parts)
 end
@@ -466,8 +466,8 @@ Logging.with_logger(SimpleLogger(devnull, Logging.Error)) do
     for i in 1:N_iterations
         println("Iteration $i")
         params_i = EKP.get_ϕ_final(prior, ensemble_kalman_process)
-        G_ens = run_ensembles(params_i, length_observations, ensemble_size)  
-        #G_ens = hcat([Float64.(G(params_i[:, j]...)[4]) for j in 1:ensemble_size]...) #Float64
+        #G_ens = run_ensembles(params_i, length_observations, ensemble_size)  
+        G_ens = hcat([Float64.(G(params_i[:, j]...)[4]) for j in 1:ensemble_size]...) #Float64
         EKP.update_ensemble!(ensemble_kalman_process, G_ens)
     end
 end
