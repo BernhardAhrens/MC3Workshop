@@ -1,0 +1,556 @@
+# =============================================================================
+# Perfect Model Site-Level Calibration Tutorial
+# =============================================================================
+# 
+# This tutorial demonstrates how to perform a perfect model calibration
+# experiment using ClimaLand. In a perfect model experiment, we generate
+# synthetic observations from our model with known parameters, then use ensemble
+# Kalman inversion to recover those parameters. This approach allows us to
+# evaluate the calibration method without the influence of model structural
+# errors.
+# 
+# In this tutorial we will calibrate the Vcmax25 parameter using synthetic latent heat
+# flux observations from the FLUXNET site (US-MOz).
+# 
+# Overview
+# --------
+# The tutorial covers:
+# 1. Setting up a land surface model for a FLUXNET site (US-MOz)
+# 2. Creating a synthetic observation dataset
+# 3. Implementing Ensemble Kalman Inversion
+# 4. Analyzing the calibration results
+# 
+# If you are unable to run this notebook, the same calibration experiment can be 
+# found in the ClimaLand documentation.
+
+# =============================================================================
+# Prerequisites
+# =============================================================================
+# 
+# First, ensure you have the required packages installed:
+
+ENV["JULIA_PKG_PRECOMPILE_AUTO"]=0
+#using Pkg
+#default_jupyter_noteboks_pkgs = ["Adapt", "CSV", "DataFrames", "IJulia", "Lux",
+#  "Makie", "Plots", "Reactant", "CUDA_Runtime_jll", "CUDA"]
+#Pkg.rm(default_jupyter_noteboks_pkgs)
+#required_pkgs = ["ClimaLand", "ClimaDiagnostics", "CairoMakie",
+#  "EnsembleKalmanProcesses", "Random", "Logging", "ClimaAnalysis", "GeoMakie",
+#  "Printf", "StatsBase"]
+#Pkg.add(required_pkgs)
+#Pkg.instantiate()
+#Pkg.add(PackageSpec("ClimaLand", v"0.18.1"))
+#Pkg.precompile()
+
+## =============================================================================
+# Setup and Imports
+# =============================================================================
+# 
+# Load all the necessary packages for land surface modeling, diagnostics,
+# plotting, and ensemble methods:
+
+using ClimaLand
+using ClimaLand.Domains: Column
+using ClimaLand.Soil
+
+using ClimaLand.Simulations
+import ClimaLand.FluxnetSimulations as FluxnetSimulations
+import ClimaLand.Parameters as LP
+import ClimaLand.LandSimVis as LandSimVis
+import ClimaDiagnostics
+import EnsembleKalmanProcesses as EKP
+import EnsembleKalmanProcesses.ParameterDistributions as PD
+using CairoMakie
+CairoMakie.activate!()
+using Statistics
+using Logging
+import Random
+using Dates
+using ClimaAnalysis, GeoMakie, Printf, StatsBase
+
+# =============================================================================
+# Configuration and Site Setup
+# =============================================================================
+# 
+# Configure the experiment parameters and set up the FLUXNET site (US-MOz) with
+# its specific location, time settings, and atmospheric conditions.
+
+# =============================================================================
+# Set random seed for reproducibility and floating point precision
+# =============================================================================
+
+rng_seed = 1234
+rng = Random.MersenneTwister(rng_seed)
+const FT = Float32
+
+# =============================================================================
+# Initialize land parameters and site configuration.
+# =============================================================================
+
+earth_param_set = LP.LandParameters(FT)
+site_ID = "US-MOz"
+site_ID_val = FluxnetSimulations.replace_hyphen(site_ID)
+
+# =============================================================================
+# Get site-specific information: location coordinates, time offset, and sensor
+# height.
+# =============================================================================
+
+(; time_offset, lat, long) =
+    FluxnetSimulations.get_location(FT, Val(site_ID_val))
+(; atmos_h) = FluxnetSimulations.get_fluxtower_height(FT, Val(site_ID_val))
+
+# =============================================================================
+# Get maximum simulation start and end dates.
+# =============================================================================
+
+(start_date, stop_date) = FluxnetSimulations.get_data_dates(site_ID, time_offset)
+start_date = DateTime(2010, 5, 1, 6, 30)  # Set the start date manually
+stop_date = DateTime(2010, 8, 1, 6, 30)  # Set the stop date manually
+Δt = 450.0  # seconds
+
+# =============================================================================
+# Domain and Forcing Setup
+# =============================================================================
+# 
+# Create the computational domain and load the necessary forcing data for the
+# land surface model.
+
+# =============================================================================
+# Create a column domain representing a 2-meter deep soil column with 10
+# vertical layers.
+# =============================================================================
+
+zmin = FT(-2)  # 2m depth
+zmax = FT(0)   # surface
+domain = Column(; zlim = (zmin, zmax), nelements = 10, longlat = (long, lat));
+
+# =============================================================================
+# Load prescribed atmospheric and radiative forcing from FLUXNET data
+# =============================================================================
+
+forcing = FluxnetSimulations.prescribed_forcing_fluxnet(
+    site_ID,
+    lat,
+    long,
+    time_offset,
+    atmos_h,
+    start_date,
+    earth_param_set,
+    FT,
+);
+
+# =============================================================================
+# Get Leaf Area Index (LAI) data from MODIS satellite observations.
+# =============================================================================
+
+modis_lai_ncdata_path = ClimaLand.Artifacts.modis_lai_multiyear_paths(;
+    start_date,
+    end_date = stop_date,
+)
+LAI = ClimaLand.prescribed_lai_modis(
+    modis_lai_ncdata_path,
+    domain.space.surface,
+    start_date,
+);
+
+# =============================================================================
+# Model Setup
+# =============================================================================
+# 
+# Create an integrated land model that couples canopy, snow, soil, and soil CO2
+# components. This comprehensive model allows us to simulate the full land
+# surface system and its interactions.
+
+function model(; Ea_sx, kM_sx, kM_o2)
+
+    Ea_sx = FT(Ea_sx)
+    kM_sx = FT(kM_sx)
+    kM_o2 = FT(kM_o2)
+    # Set up ground conditions and define which components to simulate prognostically
+    prognostic_land_components = (:canopy, :snow, :soil, :soilco2)
+
+    soil_co2_parameters = Soil.Biogeochemistry.SoilCO2ModelParameters(FT ; kM_sx, Ea_sx, kM_o2)
+
+    soil = Soil.EnergyHydrology{FT}(
+        domain,
+        forcing,
+        earth_param_set;
+        prognostic_land_components = (:canopy, :snow, :soil, :soilco2),
+        additional_sources = (ClimaLand.RootExtraction{FT}(),),
+    )
+    soilco2 = Soil.Biogeochemistry.SoilCO2Model{FT}(
+        domain,
+        Soil.Biogeochemistry.SoilDrivers(
+            Soil.Biogeochemistry.PrognosticMet(soil.parameters),
+            PrescribedSoilOrganicCarbon{FT}(TimeVaryingInput((t) -> 5)),
+            forcing.atmos,
+        );
+        parameters = soil_co2_parameters,
+    )
+
+    # Create integrated land model
+    land_model =
+        LandModel{FT}(forcing, LAI, earth_param_set, domain, Δt; soil, soilco2)
+
+    # Set initial conditions from FLUXNET data
+    set_ic! = FluxnetSimulations.make_set_fluxnet_initial_conditions(
+        site_ID,
+        start_date,
+        time_offset,
+        land_model,
+    )
+
+    # Configure diagnostics to output sensible and latent heat fluxes hourly
+    output_vars = ["hr", "sco2"]
+    diagnostics = ClimaLand.default_diagnostics(
+        land_model,
+        start_date;
+        output_writer = ClimaDiagnostics.Writers.DictWriter(),
+        output_vars,
+        average_period = :hourly,
+    )
+
+    # Create and run the simulation
+    simulation = Simulations.LandSimulation(
+        start_date,
+        stop_date,
+        Δt,
+        land_model;
+        set_ic!,
+        user_callbacks = (),
+        diagnostics,
+    )
+    solve!(simulation)
+    return simulation
+end
+
+# =============================================================================
+# Observation and Helper Functions
+# =============================================================================
+# 
+# Define the observation function `G` that maps from parameter space to
+# observation space, along with supporting functions for data processing:
+
+# =============================================================================
+# This function runs the model and computes diurnal average of latent heat flux
+# =============================================================================
+
+function G(Ea_sx, kM_sx, kM_o2)
+    simulation = model(; Ea_sx, kM_sx, kM_o2)
+    sco2_obs = get_sco2(simulation)
+    hr_obs = get_hr(simulation)
+    sco2_diurnal, sco2 =
+        (
+            get_diurnal_average(
+                sco2_obs,
+                simulation.start_date,
+                simulation.start_date# + Day(20),
+            )
+        )
+    hr_diurnal, hr =
+        (
+            get_diurnal_average(
+                hr_obs,
+                simulation.start_date,
+                simulation.start_date# + Day(20),
+            )
+        )
+    return (sco2_diurnal, hr_diurnal, sco2, hr)
+end
+
+# =============================================================================
+# Helper function: Extract latent heat flux from simulation diagnostics
+# =============================================================================
+
+function get_sco2(simulation)
+    return ClimaLand.Diagnostics.diagnostic_as_vectors(
+        simulation.diagnostics[1].output_writer,
+        "sco2_1h_average",
+    )
+end
+
+function get_hr(simulation)
+    return ClimaLand.Diagnostics.diagnostic_as_vectors(
+        simulation.diagnostics[1].output_writer,
+        "hr_1h_average",
+    )
+end
+
+
+# =============================================================================
+# Helper function: Compute diurnal average of a variable
+# =============================================================================
+
+function get_diurnal_average(var, start_date, spinup_date)
+    (times, data) = var
+    model_dates = if times isa Vector{DateTime}
+        times
+    else
+        Second.(getproperty.(times, :counter)) .+ start_date
+    end
+    spinup_idx = findfirst(spinup_date .<= model_dates)
+    model_dates = model_dates[spinup_idx:end]
+    data = data[spinup_idx:end]
+
+    hour_of_day = Hour.(model_dates)
+    mean_by_hour = [mean(data[hour_of_day .== Hour(i)]) for i in 0:23]
+    return mean_by_hour, data
+end
+
+# =============================================================================
+# Perfect Model Experiment Setup
+# =============================================================================
+# 
+# Since this is a perfect model experiment, we generate synthetic observations
+# from our target parameter value. This parameter will be recovered by the
+# calibration.
+
+true_Ea_sx = 61e3*0.8
+true_kM_sx = 5e-3*1.2	
+true_kM_o2 = 4e-3*1.2
+sco2_diurnal, hr_diurnal, sco2, hr = G(true_Ea_sx, true_kM_sx, true_kM_o2)
+
+observations = Float64.(hr_diurnal)
+
+out = G(true_Ea_sx, true_kM_sx, true_kM_o2)
+
+
+
+# =============================================================================
+# Plot observations over time
+# =============================================================================
+
+observation_times = collect(start_date+Hour(1):Hour(1):stop_date)
+
+# Create the plot
+fig_obs = Figure(size = (800, 400))
+ax_obs = Axis(
+    fig_obs[1, 1];
+    title = "Observations over Time",
+    xlabel = "Time",
+    ylabel = "Heterotrophic Respiration"
+)
+
+# Plot observations
+lines!(ax_obs, observation_times, observations; color = :blue, linewidth = 2, label = "Synthetic Observations")
+
+# Add legend
+axislegend(ax_obs, position = :lt)
+
+# Adjust layout and save
+resize_to_layout!(fig_obs)
+save("observations_over_time.png", fig_obs)
+fig_obs
+
+
+
+
+# =============================================================================
+# Define observation error covariance for the ensemble Kalman process. A flat
+# covariance is used here for simplicity.
+# =============================================================================
+
+noise_covariance = 0.05 * EKP.I
+
+# =============================================================================
+# Prior Distribution and Calibration Configuration
+# =============================================================================
+# 
+# Set up the prior distribution for the parameter and configure the ensemble
+# Kalman inversion:
+
+# =============================================================================
+# Constrained Gaussian prior for Vcmax25 with bounds [0, 2e-3]
+# =============================================================================
+
+prior_u1 = PD.constrained_gaussian("Ea_sx", 61e3, 10e3, 0, 200e3)
+prior_u2 = PD.constrained_gaussian("kM_sx", 5e-3, 1e-3, 0, 20e-3)
+prior_u3 = PD.constrained_gaussian("kM_o2", 4e-3, 1e-3, 0, 20e-3)
+prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
+
+# =============================================================================
+# Set the ensemble size and number of iterations
+# =============================================================================
+
+ensemble_size = 30
+N_iterations = 20
+
+# =============================================================================
+# Ensemble Kalman Inversion
+# =============================================================================
+# 
+# Initialize and run the ensemble Kalman process:
+
+# =============================================================================
+# Sample the initial parameter ensemble from the prior distribution
+# =============================================================================
+
+initial_ensemble = EKP.construct_initial_ensemble(rng, prior, ensemble_size)
+
+ensemble_kalman_process = EKP.EnsembleKalmanProcess(
+    initial_ensemble,
+    observations,
+    noise_covariance,
+    EKP.Inversion();
+    scheduler = EKP.DataMisfitController(
+        terminate_at = Inf,
+        on_terminate = "continue",
+    ),
+    rng,
+);
+
+function run_ensembles(params, length_observations, ensemble_size)
+    G_ens = Array{Float64}(undef, length_observations, ensemble_size)
+    Threads.@threads for j in 1:ensemble_size
+        # Unpack parameters for member j
+        Ea_sx  = params[1, j]
+        kM_sx  = params[2, j]
+        kM_o2  = params[3, j]
+        # Run model → take hr (4th return)
+        _, mean_hr_diurnal, _, hr = G(Ea_sx, kM_sx, kM_o2)
+        G_ens[:, j] = Float64.(mean_hr_diurnal)
+    end
+    return G_ens
+end
+
+using Distributed
+addprocs(11; exeflags="--project")  # pick your count
+
+@everywhere begin
+    using ClimaLand, EnsembleKalmanProcesses
+    using ClimaLand.FluxnetSimulations
+    using ClimaLand.Simulations
+    using ClimaLand.Domains
+    using ClimaLand.Soil
+    using ClimaLand.Soil.Biogeochemistry
+    using ClimaLand.Soil.EnergyHydrology
+    using ClimaLand.LandModel
+    using ClimaLand.Diagnostics
+    using ClimaLand.Parameters
+    using ClimaLand.LandSimVis
+    using ClimaLand.Artifacts
+    using ClimaLand.PrescribedSoilOrganicCarbon
+    using ClimaLand.RootExtraction
+    using ClimaLand.PrescribedSoilOrganicCarbon
+    observations = Float64.(hr_diurnal)
+    noise_covariance = 0.05 * EKP.I
+    prior_u1 = PD.constrained_gaussian("Ea_sx", 61e3, 10e3, 0, 200e3)
+    prior_u2 = PD.constrained_gaussian("kM_sx", 5e-3, 1e-3, 0, 20e-3)
+    prior_u3 = PD.constrained_gaussian("kM_o2", 4e-3, 1e-3, 0, 20e-3)
+    prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
+    canopy_parameters = Canopy.CanopyModelParameters(FT)
+    canopy_forcing = Canopy.CanopyForcing(forcing, LAI, earth_param_set, domain, Δt)
+end
+
+function run_ensembles(params, nobs, nens)
+    parts = pmap(1:nens) do j
+        _, hr_diurnal, _, _ = G(params[1,j], params[2,j], params[3,j])
+        Float64.(hr_diurnal)
+    end
+    reduce(hcat, parts)
+end
+
+# =============================================================================
+# Run the ensemble of forward models to iteratively update the parameter ensemble.
+# The logging code prevents unwanted warnings from cluttering the output.
+# 
+# This snippet will take a while to execute, since it is executing 30 forward 
+# model runs in sequence.
+# =============================================================================
+Threads.nthreads()
+
+length_observations = length(observations)
+
+Logging.with_logger(SimpleLogger(devnull, Logging.Error)) do
+    for i in 1:N_iterations
+        println("Iteration $i")
+        params_i = EKP.get_ϕ_final(prior, ensemble_kalman_process)
+        G_ens = run_ensembles(params_i, length_observations, ensemble_size)  
+        #G_ens = hcat([Float64.(G(params_i[:, j]...)[4]) for j in 1:ensemble_size]...) #Float64
+        EKP.update_ensemble!(ensemble_kalman_process, G_ens)
+    end
+end
+
+# =============================================================================
+# Results Analysis and Visualization
+# =============================================================================
+# 
+# Get the mean of the final parameter ensemble:
+
+EKP.get_ϕ_mean_final(prior, ensemble_kalman_process)
+
+# =============================================================================
+# Now, let's analyze the calibration results by examining parameter evolution
+# and comparing model outputs across iterations.
+# 
+# Plot the parameter ensemble evolution over iterations to visualize
+# convergence:
+# =============================================================================
+
+dim_size = sum(length.(EKP.batch(prior)))
+fig = CairoMakie.Figure(size = ((dim_size + 1) * 500, 500))
+
+for i in 1:dim_size
+    EKP.Visualize.plot_ϕ_over_iters(
+        fig[1, i],
+        ensemble_kalman_process,
+        prior,
+        i,
+    )
+end
+
+EKP.Visualize.plot_error_over_iters(
+    fig[1, dim_size + 1],
+    ensemble_kalman_process,
+)
+CairoMakie.save("constrained_params_and_error.png", fig)
+fig
+
+# =============================================================================
+# Compare the model output between the first and last iterations to assess
+# improvement:
+# =============================================================================
+
+fig = CairoMakie.Figure(size = (900, 400))
+
+first_G_ensemble = EKP.get_g(ensemble_kalman_process, 1)
+last_iter = EKP.get_N_iterations(ensemble_kalman_process)
+last_G_ensemble = EKP.get_g(ensemble_kalman_process, last_iter)
+n_ens = EKP.get_N_ens(ensemble_kalman_process)
+
+ax = Axis(
+    fig[1, 1];
+    title = "G ensemble: first vs last iteration (n = $(n_ens), iters 1 vs $(last_iter))",
+    xlabel = "Observation index",
+    ylabel = "G",
+)
+
+# Plot model output of first vs last iteration ensemble
+for g in eachcol(first_G_ensemble)
+    lines!(ax, 1:length(g), g; color = (:red, 0.6), linewidth = 1.5)
+end
+
+for g in eachcol(last_G_ensemble)
+    lines!(ax, 1:length(g), g; color = (:blue, 0.6), linewidth = 1.5)
+end
+
+lines!(ax, 1:length(observations), observations; color = (:black, 0.6), linewidth = 3)
+
+axislegend(
+    ax,
+    [
+        LineElement(color = :red, linewidth = 2),
+        LineElement(color = :blue, linewidth = 2),
+        LineElement(color = :black, linewidth = 4),
+
+    ],
+    ["First ensemble", "Last ensemble", "Observations"];
+    position = :rb,
+    framevisible = false,
+)
+
+CairoMakie.resize_to_layout!(fig)
+CairoMakie.save("G_first_and_last.png", fig)
+fig
+
