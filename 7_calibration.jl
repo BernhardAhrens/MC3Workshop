@@ -105,8 +105,8 @@ site_ID_val = FluxnetSimulations.replace_hyphen(site_ID)
 # =============================================================================
 
 (start_date, stop_date) = FluxnetSimulations.get_data_dates(site_ID, time_offset)
-start_date = DateTime(2010, 3, 1, 6, 30)  # Set the start date manually
-stop_date = DateTime(2010, 6, 1, 6, 30)  # Set the stop date manually
+start_date = DateTime(2010, 5, 1, 6, 30)  # Set the start date manually
+stop_date = DateTime(2010, 8, 1, 6, 30)  # Set the stop date manually
 Δt = 450.0  # seconds
 
 # =============================================================================
@@ -238,25 +238,25 @@ end
 
 function G(Ea_sx, kM_sx, kM_o2)
     simulation = model(; Ea_sx, kM_sx, kM_o2)
-    sco2 = get_sco2(simulation)
-    hr = get_hr(simulation)
-    sco2_obs =
-        Float64.(
+    sco2_obs = get_sco2(simulation)
+    hr_obs = get_hr(simulation)
+    sco2_diurnal, sco2 =
+        (
             get_diurnal_average(
-                sco2,
+                sco2_obs,
                 simulation.start_date,
-                simulation.start_date + Day(20),
+                simulation.start_date# + Day(20),
             )
         )
-    hr_obs =
-        Float64.(
+    hr_diurnal, hr =
+        (
             get_diurnal_average(
-                hr,
+                hr_obs,
                 simulation.start_date,
-                simulation.start_date + Day(20),
+                simulation.start_date# + Day(20),
             )
         )
-    return (sco2_obs, hr_obs)
+    return (sco2_diurnal, hr_diurnal, sco2, hr)
 end
 
 # =============================================================================
@@ -295,7 +295,7 @@ function get_diurnal_average(var, start_date, spinup_date)
 
     hour_of_day = Hour.(model_dates)
     mean_by_hour = [mean(data[hour_of_day .== Hour(i)]) for i in 0:23]
-    return mean_by_hour
+    return mean_by_hour, data
 end
 
 # =============================================================================
@@ -309,17 +309,19 @@ end
 true_Ea_sx = 61e3*0.8
 true_kM_sx = 5e-3*1.2	
 true_kM_o2 = 4e-3*1.2
-sco2_obs, hr_obs = G(true_Ea_sx, true_kM_sx, true_kM_o2)
+sco2_diurnal, hr_diurnal, sco2, hr = G(true_Ea_sx, true_kM_sx, true_kM_o2)
 
-observations = hr_obs
+observations = Float64.(hr_diurnal)
+
+out = G(true_Ea_sx, true_kM_sx, true_kM_o2)
+
 
 
 # =============================================================================
 # Plot observations over time
 # =============================================================================
 
-# Create a time series for the observations (24 hourly values)
-observation_times = collect(start_date:Hour(1):start_date + Day(1) - Hour(1))
+observation_times = collect(start_date+Hour(1):Hour(1):stop_date)
 
 # Create the plot
 fig_obs = Figure(size = (800, 400))
@@ -331,14 +333,10 @@ ax_obs = Axis(
 )
 
 # Plot observations
-lines!(ax_obs, observation_times, observations; color = :blue, linewidth = 2, label = "Observations")
-#scatter!(ax_obs, observation_times, observations; color = :red, markersize = 8, label = "Data points")
-
-# Format x-axis to show dates nicely
-ax_obs.xtickformat = Dates.DateFormat("HH:MM")
+lines!(ax_obs, observation_times, observations; color = :blue, linewidth = 2, label = "Synthetic Observations")
 
 # Add legend
-axislegend(ax_obs, position = :rt)
+axislegend(ax_obs, position = :lt)
 
 # Adjust layout and save
 resize_to_layout!(fig_obs)
@@ -375,8 +373,8 @@ prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
 # Set the ensemble size and number of iterations
 # =============================================================================
 
-ensemble_size = 10
-N_iterations = 2
+ensemble_size = 30
+N_iterations = 20
 
 # =============================================================================
 # Ensemble Kalman Inversion
@@ -402,6 +400,57 @@ ensemble_kalman_process = EKP.EnsembleKalmanProcess(
     rng,
 );
 
+function run_ensembles(params, length_observations, ensemble_size)
+    G_ens = Array{Float64}(undef, length_observations, ensemble_size)
+    Threads.@threads for j in 1:ensemble_size
+        # Unpack parameters for member j
+        Ea_sx  = params[1, j]
+        kM_sx  = params[2, j]
+        kM_o2  = params[3, j]
+        # Run model → take hr (4th return)
+        _, mean_hr_diurnal, _, hr = G(Ea_sx, kM_sx, kM_o2)
+        G_ens[:, j] = Float64.(mean_hr_diurnal)
+    end
+    return G_ens
+end
+
+using Distributed
+addprocs(11; exeflags="--project")  # pick your count
+
+@everywhere begin
+    using ClimaLand, EnsembleKalmanProcesses
+    using ClimaLand.FluxnetSimulations
+    using ClimaLand.Simulations
+    using ClimaLand.Domains
+    using ClimaLand.Soil
+    using ClimaLand.Soil.Biogeochemistry
+    using ClimaLand.Soil.EnergyHydrology
+    using ClimaLand.LandModel
+    using ClimaLand.Diagnostics
+    using ClimaLand.Parameters
+    using ClimaLand.LandSimVis
+    using ClimaLand.Artifacts
+    using ClimaLand.PrescribedSoilOrganicCarbon
+    using ClimaLand.RootExtraction
+    using ClimaLand.PrescribedSoilOrganicCarbon
+    observations = Float64.(hr_diurnal)
+    noise_covariance = 0.05 * EKP.I
+    prior_u1 = PD.constrained_gaussian("Ea_sx", 61e3, 10e3, 0, 200e3)
+    prior_u2 = PD.constrained_gaussian("kM_sx", 5e-3, 1e-3, 0, 20e-3)
+    prior_u3 = PD.constrained_gaussian("kM_o2", 4e-3, 1e-3, 0, 20e-3)
+    prior = PD.combine_distributions([prior_u1, prior_u2, prior_u3])
+    canopy_parameters = Canopy.CanopyModelParameters(FT)
+    canopy_forcing = Canopy.CanopyForcing(forcing, LAI, earth_param_set, domain, Δt)
+end
+
+function run_ensembles(params, nobs, nens)
+    parts = pmap(1:nens) do j
+        _, hr_diurnal, _, _ = G(params[1,j], params[2,j], params[3,j])
+        Float64.(hr_diurnal)
+    end
+    reduce(hcat, parts)
+end
+
 # =============================================================================
 # Run the ensemble of forward models to iteratively update the parameter ensemble.
 # The logging code prevents unwanted warnings from cluttering the output.
@@ -409,12 +458,16 @@ ensemble_kalman_process = EKP.EnsembleKalmanProcess(
 # This snippet will take a while to execute, since it is executing 30 forward 
 # model runs in sequence.
 # =============================================================================
+Threads.nthreads()
+
+length_observations = length(observations)
 
 Logging.with_logger(SimpleLogger(devnull, Logging.Error)) do
     for i in 1:N_iterations
         println("Iteration $i")
         params_i = EKP.get_ϕ_final(prior, ensemble_kalman_process)
-        G_ens = hcat([G(params_i[:, j]...) for j in 1:ensemble_size]...)
+        G_ens = run_ensembles(params_i, length_observations, ensemble_size)  
+        #G_ens = hcat([Float64.(G(params_i[:, j]...)[4]) for j in 1:ensemble_size]...) #Float64
         EKP.update_ensemble!(ensemble_kalman_process, G_ens)
     end
 end
